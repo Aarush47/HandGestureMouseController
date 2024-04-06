@@ -1,0 +1,117 @@
+import cv2
+import mediapipe as mp
+import autopy
+import math
+
+# Initialize MediaPipe Hands with parameters for better performance
+mp_hands = mp.solutions.hands
+hands = mp_hands.Hands(max_num_hands=1, min_detection_confidence=0.7)
+
+# Get screen size for mouse control
+screen_width, screen_height = autopy.screen.size()
+
+# Open webcam
+cap = cv2.VideoCapture(0)
+
+# Define constants for mouse sensitivity and gesture thresholds
+MOUSE_SENSITIVITY = 1.5  # Increase this value to increase mouse movement sensitivity
+PINCH_DISTANCE_THRESHOLD = 20  # Adjust this value as needed
+COMPLETE_PINCH_DISTANCE_THRESHOLD = 10  # Adjust this value as needed
+SCROLL_THRESHOLD = 5  # Adjust this value as needed
+
+# Initialize variables for mouse position smoothing
+SMOOTHING_FRAMES = 5
+smoothed_positions = []
+
+# Initialize variables to track previous state
+prev_pinch_state = False
+prev_complete_pinch_state = False
+prev_finger_count = 0
+
+try:
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        # Convert the image to RGB
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+        # Detect hands in the image
+        results = hands.process(frame_rgb)
+
+        if results.multi_hand_landmarks:
+            for hand_landmarks in results.multi_hand_landmarks:
+                # Calculate average finger position for smoothing
+                avg_x, avg_y = 0, 0
+                for lm in hand_landmarks.landmark:
+                    avg_x += lm.x
+                    avg_y += lm.y
+                avg_x /= len(hand_landmarks.landmark)
+                avg_y /= len(hand_landmarks.landmark)
+
+                # Smooth the finger position
+                smoothed_positions.append((avg_x, avg_y))
+                if len(smoothed_positions) > SMOOTHING_FRAMES:
+                    smoothed_positions.pop(0)
+
+                # Calculate smoothed mouse position
+                smooth_avg_x = sum(x for x, _ in smoothed_positions) / len(smoothed_positions)
+                smooth_avg_y = sum(y for _, y in smoothed_positions) / len(smoothed_positions)
+
+                # Convert smoothed position to screen coordinates
+                cx, cy = int(smooth_avg_x * frame.shape[1]), int(smooth_avg_y * frame.shape[0])
+
+                # Reverse the direction of mouse movement based on hand movement
+                mouse_x = screen_width - int(screen_width * cx // frame.shape[1] * MOUSE_SENSITIVITY)
+                mouse_y = screen_height * cy // frame.shape[0] * MOUSE_SENSITIVITY
+                mouse_x = min(screen_width - 1, max(0, mouse_x))
+                mouse_y = min(screen_height - 1, max(0, mouse_y))
+                autopy.mouse.move(mouse_x, mouse_y)
+
+                # Draw landmarks on the image
+                for lm in hand_landmarks.landmark:
+                    h, w, c = frame.shape
+                    cx, cy = int(lm.x * w), int(lm.y * h)
+                    cv2.circle(frame, (cx, cy), 5, (255, 0, 255), cv2.FILLED)
+
+                # Calculate distance between thumb and index finger landmarks
+                thumb_tip = (hand_landmarks.landmark[4].x * w, hand_landmarks.landmark[4].y * h)
+                index_tip = (hand_landmarks.landmark[8].x * w, hand_landmarks.landmark[8].y * h)
+                distance = math.sqrt((index_tip[0] - thumb_tip[0]) ** 2 + (index_tip[1] - thumb_tip[1]) ** 2)
+
+                # Perform left click action on pinch gesture
+                if distance < PINCH_DISTANCE_THRESHOLD:
+                    if not prev_pinch_state:  # Perform click only once on pinch gesture
+                        autopy.mouse.click(autopy.mouse.Button.LEFT)
+                    prev_pinch_state = True
+                else:
+                    prev_pinch_state = False
+
+                # Perform right click action on complete pinch gesture
+                if distance < COMPLETE_PINCH_DISTANCE_THRESHOLD:
+                    if not prev_complete_pinch_state:  # Perform click only once on complete pinch gesture
+                        autopy.mouse.click(autopy.mouse.Button.RIGHT)
+                    prev_complete_pinch_state = True
+                else:
+                    prev_complete_pinch_state = False
+
+                # Perform scroll action on joining all five fingers
+                finger_count = sum(1 for lm in hand_landmarks.landmark if lm.visibility > 0)
+                if finger_count == 5 and prev_finger_count != 5:
+                    autopy.mouse.toggle(True)  # Start dragging
+                elif finger_count < 5 and prev_finger_count == 5:
+                    autopy.mouse.toggle(False)  # Stop dragging
+                prev_finger_count = finger_count
+
+        # Show the frame
+        cv2.imshow('Finger Mouse Control', frame)
+
+        # Break the loop when 'q' is pressed
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+finally:
+    # Release resources in a finally block to ensure they're released even if there's an error
+    cap.release()
+    cv2.destroyAllWindows()
+    hands.close()
